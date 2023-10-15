@@ -28,6 +28,7 @@ struct process_node {
     struct process_node *next;
     pid_t id;
     int executed;
+    int priority;
     clock_t start;
     clock_t end;
 };
@@ -48,12 +49,13 @@ struct process_queue *pcb_initialize() {
     return pcb;
 }
 
-void add_to_pcb(struct process_queue *pcb, const char *file_name) {
+void add_to_pcb(struct process_queue *pcb, const char *file_name,int priority) {
     struct process_node *new_process = (struct process_node *)malloc(sizeof(struct process_node));
     new_process->file = strdup(file_name);
     new_process->next = NULL;
     new_process->id = 0;
     new_process->executed = 0;
+    new_process->priority = priority;
 
     if (pcb->front == NULL) {
         pcb->front = new_process;
@@ -139,50 +141,68 @@ void scheduler_handler(int scheduler_sig) {
 
         while(shared_mem->pcb->front != NULL){
             for (int i = 0; i < ncpu; i++) {
-            if (sch_pcb->front == NULL) {
-                break;
-            }
 
-            struct process_node *current = sch_pcb->front;
-
-            if (current->id == 0) {
-                printf("FIRST TIME\n");
-                char *args[] = {current->file, NULL};
-                pid_t process_id = fork();
-
-                if (process_id < 0) {
-                    perror("Fork failed");
+                if (sch_pcb->front == NULL) {
                     break;
-                } else if (process_id == 0) {
-                    running_command_sch(current->file, args, 0);
-                    // Exit the child process after it's done
+                }
+
+                struct process_node *highest_priority = sch_pcb->front;
+                struct process_node *current = sch_pcb->front;
+
+                while (current != NULL) { 
+                    if (current->priority < highest_priority->priority) {
+                        highest_priority = current; 
+                        } 
+                    current = current->next; 
+                }
+
+                if(highest_priority->id == 0){
+                    //printf("FIRST TIME\n");
+                    char *args[] = {highest_priority->file, NULL};
+                    pid_t process_id = fork();
+                    if (process_id < 0) {
+                        perror("Fork failed");
+                        break;
+                    } 
+                    else if (process_id == 0) {
+                    running_command_sch(highest_priority->file, args, 0);
                     exit(0);
-                } else {
-                    current->id = process_id;
-                    // Wait for the child process to finish and retrieve its status
+                    } 
+                    else {
+                    highest_priority->id = process_id;
                     int status;
                     waitpid(process_id, &status, 0);
+                    }
                 }
-            } else if (current->executed == 0) {
-                printf("REDOING\n");
-                // Set the executed flag to indicate that the process is already running
-                current->executed = 1;
 
-                kill(current->id, SIGCONT);
-                usleep(1000 * tslice);
-                kill(current->id, SIGSTOP);
-            } else {
-                // The process has already been executed; dequeue it and free memory
-                printf("Done - %s\n", current->file);
-
-                sem_wait(&shared_mem->mutex);
-                sch_pcb->front = current->next;
-                free(current->file);
-                free(current);
-                sem_post(&shared_mem->mutex);
+                else if (highest_priority->executed == 0) {
+                    //printf("REDOING\n");
+                    highest_priority->executed = 1;
+                    kill(highest_priority->id, SIGCONT);
+                    usleep(1000 * tslice);
+                    kill(highest_priority->id, SIGSTOP);
+                } 
+                else {
+                    //printf("Done - %s\n",highest_priority->file);
+                    //Critical Section
+                    sem_wait(&shared_mem->mutex);
+                    if (highest_priority == sch_pcb->front) { 
+                        sch_pcb->front = highest_priority->next; 
+                        } 
+                    else { 
+                        current = sch_pcb->front; 
+                        while (current->next != highest_priority) {
+                             current = current->next; 
+                             } 
+                        current->next = highest_priority->next; 
+                        }
+                    free(highest_priority->file);
+                    free(highest_priority);
+                    sem_post(&shared_mem->mutex);
+                }
+                //printf("CYCLE DONE\n");
             }
         }
-    }
     }
 }
 
@@ -208,13 +228,14 @@ int main() {
     int pipes = 0;
     int state;
 
-    printf("manitk@linux-desktop~$ Enter total number of CPU resources: ");
+    printf("Enter total number of CPU resources: ");
     scanf("%d", &ncpu);
-    printf("manitk@linux-desktop~$ Enter time quantum (in milliseconds): ");
+    printf("Enter time quantum (in milliseconds): ");
     scanf("%d", &tslice);
 
     // SimpleShell
     while (1) {
+        printf("\n");
         printf("manitk@linux-desktop~$ ");
         fgets(input_str, sizeof(input_str), stdin);
         start_time = clock();
@@ -270,12 +291,16 @@ int main() {
             if (strcmp(command, "submit") == 0) {
                 //Adding Process to PCB Queue
                 sem_wait(&shared_mem->mutex);
-                add_to_pcb(shared_mem->pcb, arguments[1]);
+                if(arguments[2] != NULL){
+                    add_to_pcb(shared_mem->pcb, arguments[1],atoi(arguments[2]));
+                }
+                else{
+                    add_to_pcb(shared_mem->pcb, arguments[1],1); //default priority of 1 
+                }
                 sem_post(&shared_mem->mutex);
-                //printf("%s \n",shared_mem->pcb->rear->file);
             }
             else if (strcmp(command, "start") == 0) {
-                // Signal the SimpleScheduler to start
+                // Signal the SimpleScheduler to start using custom signal - SIGUSR1
                 kill(0,SIGUSR1);
             }
             else {

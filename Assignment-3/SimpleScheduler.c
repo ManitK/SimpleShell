@@ -27,6 +27,7 @@ struct process_node {
     char *file;
     struct process_node *next;
     pid_t id;
+    int executed;
     clock_t start;
     clock_t end;
 };
@@ -52,6 +53,7 @@ void add_to_pcb(struct process_queue *pcb, const char *file_name) {
     new_process->file = strdup(file_name);
     new_process->next = NULL;
     new_process->id = 0;
+    new_process->executed = 0;
 
     if (pcb->front == NULL) {
         pcb->front = new_process;
@@ -131,92 +133,58 @@ size_t shared_size = sizeof(shm_t);
 int fd_shared_mem;
 
 void scheduler_handler(int scheduler_sig) {
-    if(scheduler_sig == SIGUSR1){
+    if (scheduler_sig == SIGUSR1) {
         printf("Signal Received\n");
         struct process_queue *sch_pcb = shared_mem->pcb;
 
-        // Working of scheduler
-        //while(shared_mem->pcb->front!= NULL & shared_mem->pcb->rear!= NULL){
-
-        for(int i=0;i<ncpu;i++){
-
-            pid_t temp_id;
-            temp_id = fork();
-            if (temp_id < 0) {
-                exit(0);
+        while(shared_mem->pcb->front != NULL){
+            for (int i = 0; i < ncpu; i++) {
+            if (sch_pcb->front == NULL) {
+                break;
             }
-            if (temp_id == 0) {
-                
-                    if(sch_pcb->front == NULL){break;}
-                    else{
-                        struct process_node *current = sch_pcb->front;
-                        int j = i;
-                        while(j>0){
-                            current = current->next;
-                            j--;
-                        }
-                        //First Time Process is started
-                        if(sch_pcb->front->id == 0){
-                            printf("FIRST TIME\n");
 
-                            char *args[] = {current->file,NULL};
-                            int process_status = running_command_sch(current->file,args,0);
-                            current->id = process_status;
+            struct process_node *current = sch_pcb->front;
 
-                            if (process_status == -1) {
-                            fprintf(stderr, "Error occurred while forking\n");
-                            } 
-                            else if (process_status == -2) {
-                                fprintf(stderr, "Error occurred while executing the command\n");
-                            } 
-                            else if (process_status == -3) {
-                                fprintf(stderr, "External Error\n");
-                            }
+            if (current->id == 0) {
+                printf("FIRST TIME\n");
+                char *args[] = {current->file, NULL};
+                pid_t process_id = fork();
 
-                            // Dequeue the process and enqueue it back if necessary
-                            sem_wait(&shared_mem->mutex);
-                            sch_pcb->front = current->next;
-                            current->next = NULL;
-                            sem_post(&shared_mem->mutex);
-
-                            exit(0);
-                        }
-
-                        //Continued from where it left off
-                        else{
-                            printf("REDOING\n");
-                            // The process didn't finish in the time quantum, enqueue it
-                            sem_wait(&shared_mem->mutex);
-                            if (sch_pcb->rear == NULL) {
-                                    sch_pcb->front = current;
-                                    sch_pcb->rear = current;
-                                }
-                            else {
-                                    sch_pcb->rear->next = current;
-                                    sch_pcb->rear = current;
-                                }
-                            sem_post(&shared_mem->mutex);
-
-                            printf("Continue - %s \n",current->file);
-                            kill(current->id,SIGCONT);
-                            usleep(1000*tslice);
-                            kill(current->id,SIGSTOP);
-                        }
-                        exit(0); // Make the child process exit after doing work
-                    }
+                if (process_id < 0) {
+                    perror("Fork failed");
+                    break;
+                } else if (process_id == 0) {
+                    running_command_sch(current->file, args, 0);
+                    // Exit the child process after it's done
+                    exit(0);
+                } else {
+                    current->id = process_id;
+                    // Wait for the child process to finish and retrieve its status
+                    int status;
+                    waitpid(process_id, &status, 0);
                 }
+            } else if (current->executed == 0) {
+                printf("REDOING\n");
+                // Set the executed flag to indicate that the process is already running
+                current->executed = 1;
 
-            else { // Parent Process
-                for (int i = 0; i < ncpu; i++) { // Wait for child processes to finish 
-                int status; 
-                wait(&status); 
-                    }
-                }
-                printf("FIRST NCPU PROCESSES DONE\n");
+                kill(current->id, SIGCONT);
+                usleep(1000 * tslice);
+                kill(current->id, SIGSTOP);
+            } else {
+                // The process has already been executed; dequeue it and free memory
+                printf("Done - %s\n", current->file);
+
+                sem_wait(&shared_mem->mutex);
+                sch_pcb->front = current->next;
+                free(current->file);
+                free(current);
+                sem_post(&shared_mem->mutex);
             }
-    }
         }
-    //}
+    }
+    }
+}
 
 int main() {
     // SimpleScheduler - Wait until a signal is received

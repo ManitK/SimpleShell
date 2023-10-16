@@ -9,6 +9,7 @@ int fibonacci(int n) {
     }
 
 int main(){
-    printf("%d \n",fibonacci(45));
+    printf("\n");
+    printf("%d \n",fibonacci(30));
 }
 

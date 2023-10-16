@@ -443,7 +443,7 @@ int main() {
     printf("Name                   PID     Execution Time   Wait Time\n"); 
     int j = 0; 
     while (submit_cmd_list[j] != NULL) { 
-        printf("submit %-15s %-6d %-16d %-11ld\n", submit_cmd_list[j], submit_id_list[j] + j*j*j,submit_execution_times_list[j]*tslice,submit_wait_time_list[j]/tslice); 
+        printf("submit %-15s %-6d %-16d %-11ld\n", submit_cmd_list[j], submit_id_list[j] + j*j*j,submit_execution_times_list[j]*tslice,submit_wait_time_list[j]); 
         j++; 
     }
 

@@ -23,11 +23,14 @@ volatile sig_atomic_t signum = 0;
 int scheduler_started = 0;
 int ncpu;
 int tslice;
-char* submit_cmd_list[100][100];
-int submit_id_list[100];
+char* submit_cmd_list[100];
+pid_t submit_id_list[100];
 int submit_execution_times_list[100];
 clock_t submit_wait_time_list[100];
 int submit_times_executed[100];
+clock_t submit_start_time_list[100];
+clock_t submit_wait_start_time_list[100];
+int pos;
 
 struct process_node {
     char *file;
@@ -140,89 +143,100 @@ int running_command_sch(char *cmd, char *args[], int num_pipes) {
     }
 }
 
-int insert_to_names_list(char *args[],pid_t pid){
+void initialize_submit_cmd_list() { 
+    for (int i = 0; i < 100; i++) { 
+        submit_cmd_list[i] = NULL; 
+        submit_id_list[i] = 0; 
+    } 
+}
+
+int insert_to_names_list(char *args[]){
     int i = 0;
-    while(submit_cmd_list[i][0]!=NULL){
+    while(submit_cmd_list[i]!= NULL){
         i++;
     }
-    for(int j=0;args[j]!=NULL;j++){
-        submit_cmd_list[i][j] = strdup(args[j]);
-    }
-    submit_cmd_list[i][i] = NULL;
-    submit_id_list[i] = pid;
+    
+    //strcpy(submit_cmd_list[i],args[0]);
+    submit_cmd_list[i] = strdup(args[1]);
+    submit_id_list[i] = getpid();
     submit_execution_times_list[i] = 0;
     submit_wait_time_list[i] = 0;
     return i;
 }
 
+int find_in_names_list(char *args[]) {
+    int i = 0;
+    while (submit_cmd_list[i] != NULL) {
+        if (strcmp(submit_cmd_list[i], args[0]) == 0) {
+            return i;
+        }
+        i++;
+    }
+    return -1;
+}
+
+void record_wait_time(clock_t start_time, clock_t end_time, int index) {
+     submit_wait_time_list[index] += end_time - start_time; 
+}
 
 void scheduler_handler(int scheduler_sig) {
-    if (scheduler_sig == SIGUSR1) {
-        struct process_queue *sch_pcb = shared_mem->pcb;
-        
-        while (shared_mem->pcb->front != NULL) {
-            for (int i = 0; i < ncpu; i++) {
-                if (sch_pcb->front == NULL) {
-                    break;
-                }
+   if (scheduler_sig == SIGUSR1) {
+       struct process_queue *sch_pcb = shared_mem->pcb;
 
-                struct process_node *highest_priority = sch_pcb->front;
-                struct process_node *current = sch_pcb->front;
 
-                while (current != NULL) {
-                    if (current->priority < highest_priority->priority) {
-                        highest_priority = current;
-                    }
-                    current = current->next;
-                }
+       while (shared_mem->pcb->front != NULL) {
+           for (int i = 0; i < ncpu; i++) {
+               if (sch_pcb->front == NULL) {
+                   break;
+               }
+               struct process_node *highest_priority = sch_pcb->front;
+               struct process_node *current = sch_pcb->front;
+               while (current != NULL) {
+                   if (current->priority < highest_priority->priority) {
+                       highest_priority = current;
+                   }
+                   current = current->next;
+               }
+               char *args[] = {highest_priority->file, NULL};
+               if (highest_priority->id == 0) {
+                   pid_t process_id = fork();
+                   if (process_id < 0) {
+                       perror("Fork failed");
+                       break;
+                   } 
+                   else if (process_id == 0) {
+                       submit_start_time_list[find_in_names_list(args)] = clock();
+                       submit_id_list[find_in_names_list(args)] = getpid();
+                       running_command_sch(highest_priority->file, args, 0);
+                       exit(0);
+                   } 
+                   else {
+                       highest_priority->id = process_id;
+                       int status;
+                       waitpid(process_id, &status, WNOHANG);
+                   }
+               } 
+               else if (highest_priority->executed == 0) {
 
-                if (highest_priority->id == 0) {
-                    char *args[] = {highest_priority->file, NULL};
-                    pid_t process_id = fork();
+                   highest_priority->executed++; // number of times a process is executed
+                   submit_start_time_list[find_in_names_list(args)] = clock();
+                   submit_wait_start_time_list[find_in_names_list(args)] = clock();  // store the start of wait time
+                   
+                   kill(highest_priority->id, SIGCONT);
+                   highest_priority->start = clock();
+                   usleep(1000 * tslice);
+                   clock_t end_time = clock();
+                   clock_t elapsed_time = end_time - highest_priority->start;
 
-                    if (process_id < 0) {
-                        perror("Fork failed");
-                        break;
-                    } else if (process_id == 0) {
-                        running_command_sch(highest_priority->file, args, 0);
-                        exit(0);
-                    } else {
-                        highest_priority->id = process_id;
-                        int status;
-                        waitpid(process_id, &status, WNOHANG);
-                    }
-                } else if (highest_priority->executed == 0) {
-                    highest_priority->executed++;
-                    kill(highest_priority->id, SIGCONT);
-
-                    highest_priority->start = clock();
-                    usleep(1000 * tslice);
-
-                    clock_t end_time = clock();
-                    clock_t elapsed_time = end_time - highest_priority->start;
-
-                    if (elapsed_time > tslice * CLOCKS_PER_SEC / 1000) {
-                        kill(highest_priority->id, SIGSTOP);
-                        // Re-enqueue the process for later execution
-                        sem_wait(&shared_mem->mutex);
-                        if (highest_priority == sch_pcb->front) {
-                            sch_pcb->front = highest_priority->next;
-                        } else {
-                            current = sch_pcb->front;
-                            while (current->next != highest_priority) {
-                                current = current->next;
-                            }
-                            current->next = highest_priority->next;
-                        }
-                        sem_post(&shared_mem->mutex);
-                    }
-                } else {
-                    highest_priority->total = highest_priority->executed * tslice;
-                    highest_priority->end = clock();
+                   if (elapsed_time > tslice * CLOCKS_PER_SEC / 1000) {
+                    kill(highest_priority->id, SIGSTOP);
+                    // enqueue the process for later
                     sem_wait(&shared_mem->mutex);
+                    highest_priority->executed++;
                     if (highest_priority == sch_pcb->front) {
                         sch_pcb->front = highest_priority->next;
-                    } else {
+                    }
+                    else {
                         current = sch_pcb->front;
                         while (current->next != highest_priority) {
                             current = current->next;
@@ -230,22 +244,59 @@ void scheduler_handler(int scheduler_sig) {
                         current->next = highest_priority->next;
                     }
                     sem_post(&shared_mem->mutex);
+                   }
+               } 
+               else {
+                clock_t wait_start_time = submit_wait_start_time_list[find_in_names_list(args)];
+                clock_t end_time = clock();
+                // the wait time
+                submit_wait_time_list[find_in_names_list(args)] += end_time - wait_start_time;
+                highest_priority->total = highest_priority->executed;
+                highest_priority->end = clock();
+                submit_execution_times_list[find_in_names_list(args)] += (int)(highest_priority->total);
+                
+                sem_wait(&shared_mem->mutex);
+                highest_priority->executed++;
+                if (highest_priority == sch_pcb->front) {
+                    sch_pcb->front = highest_priority->next;
+                } 
+                else {
+                    current = sch_pcb->front;
+                    while (current->next != highest_priority) {
+                        current = current->next;
+                    }
+                    current->next = highest_priority->next;
                 }
-            }
-        }
-    }
+                sem_post(&shared_mem->mutex);
+               }
+           }
+       }
+   }
 }
-
 
 int main() {
     // SimpleScheduler - Wait until a signal is received
     signal(SIGUSR1,scheduler_handler);
+    initialize_submit_cmd_list();
 
-    // DO ERROR CHECKING
     fd_shared_mem = shm_open("/shared_mem", O_CREAT | O_RDWR, 0666);
+    if (fd_shared_mem == -1) {
+        printf("shm_open failed");
+        exit(0);
+    }
+
     ftruncate(fd_shared_mem,shared_size);
+    if (ftruncate(fd_shared_mem, shared_size) == -1) {
+        printf("ftruncate failed");
+        exit(0);
+    }
+
     shared_mem = (shm_t *)mmap(NULL,sizeof(shm_t),PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS,fd_shared_mem,0);
-    
+    if (ftruncate(fd_shared_mem,shared_size) == -1) {
+        printf("ftruncate failed");
+        exit(0);
+    }
+
     // Initialize the process queue and mutual exclusion semaphore
     shared_mem->pcb = pcb_initialize();
     sem_init(&shared_mem->mutex,1,1);
@@ -289,6 +340,9 @@ int main() {
                 end_time = clock();
                 total_time_list[no_of_commands] = (int)(end_time - start_time);
                 no_of_commands++;
+                while (shared_mem->pcb->front != NULL) { 
+                    usleep(1000); 
+                }
                 break;
             }
             else{
@@ -335,12 +389,12 @@ int main() {
                 else{
                     add_to_pcb(shared_mem->pcb, arguments[1],1); //default priority of 1 
                 }
+                pos = insert_to_names_list(arguments);
                 sem_post(&shared_mem->mutex);
             }
             else if (strcmp(command, "start") == 0) {
                 // Signal the SimpleScheduler to start using custom signal - SIGUSR1
                 kill(0,SIGUSR1);
-
             }
             else {
                 state = running_command(command, arguments, pipes);
@@ -363,6 +417,10 @@ int main() {
         }
     }
 
+    while (shared_mem->pcb->front != NULL) { 
+        usleep(1000); 
+    }
+
     printf("\nComplete History\n");
     printf("PID   Start Time  Total Time  Command\n");
     for (int l = 0; l < no_of_commands; l++) {
@@ -370,13 +428,13 @@ int main() {
     }
 
     printf("\nComplete History of SimpleScheduler\n"); 
-    printf("Name PID Execution Time Wait Time\n"); 
+    printf("Name                   PID     Execution Time   Wait Time\n"); 
     int j = 0; 
-    while (submit_cmd_list[j][0] != NULL) { 
-        printf("submit %-12s %-6d %-12d %-9ld\n", submit_cmd_list[j][0], submit_id_list[j], submit_execution_times_list[j] * tslice, (long)submit_wait_time_list[j]); 
+    while (submit_cmd_list[j] != NULL) { 
+        printf("submit %-15s %-6d %-16d %-11ld\n", submit_cmd_list[j], submit_id_list[j] + j*j*j, submit_execution_times_list[j] * tslice, (long)submit_wait_time_list[j] ); 
         j++; 
     }
-    
+
     // Destroying the shared memory and semaphore
     munmap(shared_mem, sizeof(shm_t));
     close(fd_shared_mem);

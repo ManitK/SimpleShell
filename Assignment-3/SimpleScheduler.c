@@ -279,6 +279,7 @@ int main() {
     signal(SIGUSR1,scheduler_handler);
     initialize_submit_cmd_list();
 
+    // initializing the shared memory and doing error checking wherever necessary
     fd_shared_mem = shm_open("/shared_mem", O_CREAT | O_RDWR, 0666);
     if (fd_shared_mem == -1) {
         printf("shm_open failed");
@@ -309,6 +310,7 @@ int main() {
     char *iterator;
     int pipes = 0;
     int state;
+    int exit_req;
 
     printf("Enter total number of CPU resources: ");
     scanf("%d", &ncpu);
@@ -333,22 +335,36 @@ int main() {
 
         if (strcmp(input_str, "exit") == 0) {
             start_time_list[no_of_commands] = start_time;
-            if(shared_mem->pcb->front == NULL){
+            if (shared_mem->pcb->front == NULL) {
                 printf("Program Exited\n");
                 strcpy(cmd_list[no_of_commands], input_str);
                 user_status++;
                 end_time = clock();
                 total_time_list[no_of_commands] = (int)(end_time - start_time);
                 no_of_commands++;
-                while (shared_mem->pcb->front != NULL) { 
-                    usleep(1000); 
+                // waiting for all submitted processes to finish
+                int all_processes_finished = 1;
+                while (1) {
+                    all_processes_finished = 1;
+                    for (int i = 0; i < no_of_commands; i++) {
+                        if (pid_list[i] > 0) {
+                            int status;
+                            pid_t result = waitpid(pid_list[i], &status, WNOHANG);
+                            if (result == 0) {
+                                all_processes_finished = 0;
+                                usleep(1000);
+                            }
+                        }
+                    }
+                    if (all_processes_finished) {
+                        break;
+                    }
                 }
-                break;
-            }
-            else{
-                printf("Processes yet to be completed\n");
-                continue;
-            }   
+                    break;
+                } else {
+                    printf("Processes yet to be completed\n");
+                    fflush(stdout);
+                }
         }
 
         else if (strcmp(input_str, "history") == 0) {
@@ -417,10 +433,6 @@ int main() {
         }
     }
 
-    while (shared_mem->pcb->front != NULL) { 
-        usleep(1000); 
-    }
-
     printf("\nComplete History\n");
     printf("PID   Start Time  Total Time  Command\n");
     for (int l = 0; l < no_of_commands; l++) {
@@ -431,7 +443,7 @@ int main() {
     printf("Name                   PID     Execution Time   Wait Time\n"); 
     int j = 0; 
     while (submit_cmd_list[j] != NULL) { 
-        printf("submit %-15s %-6d %-16d %-11ld\n", submit_cmd_list[j], submit_id_list[j] + j*j*j, submit_execution_times_list[j] * tslice, (long)submit_wait_time_list[j] ); 
+        printf("submit %-15s %-6d %-16d %-11ld\n", submit_cmd_list[j], submit_id_list[j] + j*j*j,submit_execution_times_list[j]*tslice,submit_wait_time_list[j]/tslice); 
         j++; 
     }
 

@@ -1,140 +1,113 @@
 #include "loader.h"
- #include <unistd.h>
+#include <unistd.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <fcntl.h>
+#include <string.h>
+#include <errno.h>
+
+// ADD ERROR HANDLING + MAGIC NUMBER
+// TRY BONUS BY IMPLEMENTING WHILE LOOP
+// ADD PREVIOUS COMMENTS
 
 // Global Variables used throughout the code
 Elf32_Ehdr *ehdr;
 Elf32_Phdr *phdr;
 int fd;
-void allocate_mem(int size_of_allocation);
+# define PAGE_SIZE 4096
+void allocate_mem(Elf32_Phdr *segment, uintptr_t seg_fault_address) ;
 
-/*
- * release memory and other cleanups
- */
-void loader_cleanup() {
-  free(ehdr);
-  free(phdr);
-}
-void sigint_handler(){
-  printf("SegFault captured. ");
-  allocate_mem((int)4096);
-  exit(EXIT_SUCCESS);
-
+int find_number_of_pages(int memory_size){
+   return (memory_size/4096) + 1;
 }
 
-void allocate_mem(int size_of_allocation){
-  signal(SIGSEGV,sigint_handler);
-  void *virtual_mem;
-  size_t size_page=size_of_allocation;
-  virtual_mem=mmap(NULL, size_page, PROT_READ | PROT_EXEC, MAP_PRIVATE,fd,phdr->p_offset );
-  printf("Alloted Memory of 4kb successfully! ");
+void allocate_memory_for_each_segment(){
+   for (int i = 0; i < ehdr->e_phnum; i++) {
+       Elf32_Phdr *phdr_entry = &phdr[i];
+       uintptr_t page_start = phdr_entry->p_vaddr;
+       mmap((void *)page_start,phdr_entry->p_memsz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+       }
+   }
 
-    // Defining a function pointer type
-  typedef int (*my_function)();
+void sigsegv_handler(int signo, siginfo_t *info, void *context) {
+   if (signo == SIGSEGV) {
+       printf("Segmentation Fault captured.\n");
+       uintptr_t seg_fault_address = (uintptr_t)info->si_addr;
+       allocate_memory_for_each_segment();
+       int i;
+       for (i = 0; i < ehdr->e_phnum; i++) {
+           Elf32_Phdr *segment = &phdr[i];
+           uintptr_t segment_start = segment->p_vaddr;
+           uintptr_t segment_end = segment_start + segment->p_memsz;
+           //Finding the segment which caused the segmentation fault
+           if (seg_fault_address >= segment_start && seg_fault_address < segment_end) {
+               allocate_mem(segment, seg_fault_address);
+               return;
+           }
+       }
+   }
+}
 
-  // Initializing locations which are needed for reaching the virtual address
-  void *address_offset1 = virtual_mem;
-  void *final_address = address_offset1 + (ehdr->e_entry - phdr->p_vaddr);
-  my_function start = (my_function)(final_address);
-
-  // Running the function which is pointing to the '_start' function
-  int result = start();
-  printf("User _start return value = %d\n", result);
-
+void allocate_mem(Elf32_Phdr *segment, uintptr_t seg_fault_address) {
+   uintptr_t page_size = 4096;
+   //starting page address of segment where seg fault occured
+   uintptr_t page_start = seg_fault_address & -page_size;
+   //total count of pages needed to allocate
+   size_t page_count = find_number_of_pages(segment->p_memsz);
+   // Allocate memory for the segment
+   void *allocated_memory = mmap((void *)page_start, page_count * page_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+   //Reading into the required segment
+   off_t segment_offset = segment->p_offset;
+   ssize_t segment_size = segment->p_filesz;
+   lseek(fd,segment_offset,SEEK_SET);
+   read(fd,allocated_memory,segment_size);
+   // Calculating the new entrypoint within segment which caused segmentation fault
+   void *new_entrypoint = (void *)(segment->p_vaddr + (seg_fault_address - page_start));
+   // Cast the entry point to a function pointer
+   int (*start)() = (int (*)())new_entrypoint;
 }
 
 void load_and_run_elf(char **argv) {
+   fd = open(argv[1], O_RDONLY);
+   if (fd == -1) {
+       perror("open");
+       exit(EXIT_FAILURE);
+   }
+   ehdr = (Elf32_Ehdr *)malloc(sizeof(Elf32_Ehdr));
+   read(fd, ehdr, sizeof(Elf32_Ehdr));
+   lseek(fd, ehdr->e_phoff, SEEK_SET);
+ 
+   phdr = (Elf32_Phdr *)malloc(ehdr->e_phnum * sizeof(Elf32_Phdr));
+   read(fd, phdr, ehdr->e_phnum * sizeof(Elf32_Phdr));
+ 
+   struct sigaction catcher;
+   catcher.sa_flags = SA_SIGINFO;
+   catcher.sa_sigaction = sigsegv_handler;
+   sigaction(SIGSEGV,&catcher,NULL);
 
-  // Opened the ELF File given as input
-  fd = open(argv[1], O_RDONLY);
-
-  // Flag for checking if there is any error opening the input file
-  int fd_error_check = 0;
-  if (fd == -1) {
-    fd_error_check++;
-  }
-
-  if (fd_error_check > 0) {
-    exit(EXIT_FAILURE);
-  }
-
-  // Reading and allocating memory for ELF Header
-  ehdr = (Elf32_Ehdr *)malloc(sizeof(Elf32_Ehdr));
-  ssize_t elf_header = read(fd, ehdr, sizeof(Elf32_Ehdr));
-
-  // Setting pointer to the start of program header table
-  lseek(fd, ehdr->e_phoff, SEEK_SET);
-
-  // Reading and allocating memory for Program Header Table
-  phdr = (Elf32_Phdr *)malloc(sizeof(Elf32_Phdr));
-  read(fd, phdr, sizeof(Elf32_Phdr));
-
-  // Making a flag variable for necessary checks
-  int flag_for_entrypoint = 0;
-
-  // While loop used for iterating through different Program Header entries
-  while (read(fd, phdr, sizeof(Elf32_Phdr)) == sizeof(Elf32_Phdr)) {
-    // Primary condition - when segment type is PT_LOAD and entrypoint address is in 'p_vaddr'
-    if (phdr->p_type == PT_LOAD && ehdr->e_entry >= phdr->p_vaddr && ehdr->e_entry < (phdr->p_vaddr + phdr->p_memsz)) {
-      printf("PT_LOAD segment detected with entrypoint address\n");
-
-      // No need to map memory, directly attempt to run _start method
-      void *entrypoint = (void *)(ehdr->e_entry);
-      int (*start)() = entrypoint;
-      int result = start();
-      //printf("User _start return value = %d\n");
-      flag_for_entrypoint++;
-      return;
-    }
-
-    // Move file pointer to the next program header entry
-    lseek(fd, phdr->p_memsz, SEEK_CUR);
-
-    // Breaking out of while loop when entrypoint address is found
-    if (flag_for_entrypoint == 1) {
-      break;
-    }
-  }
-
-  // If no suitable segment with the entrypoint is found, exit with an error message.
-  printf("No suitable PT_LOAD segment with entrypoint address found.\n");
-  exit(EXIT_FAILURE);
+   int (*start)() = (int (*)())ehdr->e_entry;
+   int result = start();
+   printf("User _start return value = %d\n", result);
 }
 
 int main(int argc, char **argv) {
-  if (argc != 2) {
-    printf("Usage: %s <ELF Executable>\n", argv[0]);
-    exit(1);
-  }
-signal(SIGSEGV,sigint_handler);
-  // 1. carry out necessary checks on the input ELF file
-  int error_check_existance = 0;
-  int error_check_read_perm = 0;
+   if (argc != 2) {
+       printf("Usage: %s <ELF Executable>\n", argv[0]);
+       exit(1);
+   }
 
-  if (access(argv[1], F_OK) == -1) {
-    error_check_existance++;
-  }
-  if (access(argv[1], R_OK) == -1) {
-    error_check_read_perm++;
-  }
+   if (access(argv[1], F_OK) == -1 || access(argv[1], R_OK) == -1) {
+       perror("access");
+       exit(1);
+   }
 
-  if (error_check_existance > 0) {
-    printf("ELF File does not exist");
-    exit(1);
-  } else if (error_check_read_perm > 0) {
-    printf("Need permission for reading ELF\n");
-    exit(1);
-  }
+   load_and_run_elf(argv);
 
-  // 2. passing it to the loader for carrying out the loading/execution
-  load_and_run_elf(argv);
-
-  
-
-  // 3. invoke the cleanup routine inside the loader
-  loader_cleanup();
-  return 0;
+   free(ehdr);
+   free(phdr);
+   close(fd);
+ 
+   return 0;
 }
